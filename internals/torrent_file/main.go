@@ -1,6 +1,8 @@
 package torrentfile
 
 import (
+	"bytes"
+	"crypto/sha1"
 	"fmt"
 	"go-torrent-client/internals/bencoding"
 	"os"
@@ -9,6 +11,7 @@ import (
 type TorrentFile struct {
 	Info     TorrentInfo
 	Announce string
+	InfoHash [20]byte
 }
 
 // using single file for now , will add multiple files later
@@ -39,6 +42,21 @@ func (tf *TorrentFile) ParseTorrentFile(data []byte) error {
 	if !ok {
 		return fmt.Errorf("invalid torrent file : info not dictionary")
 	}
+
+	infoKey := "4:info"
+	index := bytes.Index(data, []byte(infoKey))
+	if index == -1 {
+		return fmt.Errorf("invalid torrent file : info not found")
+	}
+	infoData := data[index+len(infoKey):]
+	_, length , err := bencoding.ParseBencode(infoData)
+	if err != nil {
+		return err
+	}
+
+	bencodedInfo := infoData[:length]
+	tf.InfoHash = sha1.Sum(bencodedInfo)
+	
 
 	if name, ok := info["name"].([]byte); ok {
 		tf.Info.Name = string(name)
