@@ -5,13 +5,16 @@ import (
 	"crypto/sha1"
 	"fmt"
 	"go-torrent-client/internals/bencoding"
+	"net/url"
 	"os"
+	"strconv"
 )
 
 type TorrentFile struct {
 	Info     TorrentInfo
 	Announce string
 	InfoHash [20]byte
+	PeerId   [20]byte
 }
 
 // using single file for now , will add multiple files later
@@ -49,14 +52,13 @@ func (tf *TorrentFile) ParseTorrentFile(data []byte) error {
 		return fmt.Errorf("invalid torrent file : info not found")
 	}
 	infoData := data[index+len(infoKey):]
-	_, length , err := bencoding.ParseBencode(infoData)
+	_, length, err := bencoding.ParseBencode(infoData)
 	if err != nil {
 		return err
 	}
 
 	bencodedInfo := infoData[:length]
 	tf.InfoHash = sha1.Sum(bencodedInfo)
-	
 
 	if name, ok := info["name"].([]byte); ok {
 		tf.Info.Name = string(name)
@@ -92,4 +94,23 @@ func ParseTorrentFile(path string) (*TorrentFile, error) {
 		return nil, err
 	}
 	return tf, nil
+}
+
+func (tf *TorrentFile) BuildAnnounceURL(peerId [20]byte, port int) (string, error) {
+	u, err := url.Parse(tf.Announce)
+	if err != nil {
+		return "", err
+	}
+	params := url.Values{
+		"info_hash": {string(tf.InfoHash[:])},
+		"peer_id":   {string(peerId[:])},
+		"port":      {strconv.Itoa(port)},
+		"uploaded":  {"0"},
+		"downloaded": {"0"},
+		"left": {strconv.FormatInt(tf.Info.Length, 10)},
+		"compact":   {"1"},
+		"event":     {"started"},
+	}
+	u.RawQuery = params.Encode()
+	return u.String(), nil
 }
