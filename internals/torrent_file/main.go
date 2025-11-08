@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha1"
 	"fmt"
+	bitfield "go-torrent-client/internals/bitfield"
 	"go-torrent-client/internals/bencoding"
 	"net/url"
 	"os"
@@ -15,6 +16,7 @@ type TorrentFile struct {
 	Announce string
 	InfoHash [20]byte
 	PeerId   [20]byte
+	Bitfield bitfield.Bitfield
 }
 
 // using single file for now , will add multiple files later
@@ -80,6 +82,8 @@ func (tf *TorrentFile) ParseTorrentFile(data []byte) error {
 	} else {
 		return fmt.Errorf("invalid torrent file : length not int")
 	}
+
+	tf.Bitfield = bitfield.NewBitfield(int32(tf.Info.Length / tf.Info.PieceLength))
 	return nil
 }
 

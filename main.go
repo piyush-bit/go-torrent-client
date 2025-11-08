@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"go-torrent-client/internals/message"
+	peer "go-torrent-client/internals/peer"
 	torrentfile "go-torrent-client/internals/torrent_file"
 )
 
@@ -11,6 +13,36 @@ func main() {
 		fmt.Println(err)
 		return
 	}
-	tf.Info.Pieces = nil
-	fmt.Printf("%+v\n", tf)
+
+	peers, err := peer.RetrivePeers(tf)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	fmt.Println("Retrieved peers")
+
+	peerConnection, err := peers[0].Connect(tf)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	fmt.Println("Connected to peer")
+	defer peerConnection.Close()
+	errChan := make(chan error)
+	go func() {
+		err := peerConnection.ReadLoop()
+		errChan <- err
+		fmt.Println("Read loop done : ", err)
+	}()
+	go func() {
+		err := peerConnection.WriteLoop()
+		errChan <- err
+		fmt.Println("Write loop done : ", err)
+	}()
+	peerConnection.Outgoing <- message.Bitfield(peerConnection.Tf.Bitfield)
+	peerConnection.Outgoing <- message.Interested()
+
+	<-errChan
+
 }

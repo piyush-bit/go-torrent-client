@@ -7,6 +7,8 @@ import (
 	handshake "go-torrent-client/internals/Handshake"
 	"go-torrent-client/internals/bencoding"
 	torrentfile "go-torrent-client/internals/torrent_file"
+	bitfield "go-torrent-client/internals/bitfield"
+	message "go-torrent-client/internals/message"
 	"io"
 	"net"
 	"net/http"
@@ -20,6 +22,7 @@ type peer struct {
 }
 
 type peerConnection struct {
+	Tf             *torrentfile.TorrentFile
 	Peer           peer
 	Conn           net.Conn
 	PeerId         [20]byte
@@ -28,7 +31,8 @@ type peerConnection struct {
 	PeerChoked     bool
 	AmInterested   bool
 	PeerInterested bool
-	Bitfield       []byte
+	Bitfield       bitfield.Bitfield
+	Outgoing       chan *message.Message
 }
 
 func (p *peer) String() string {
@@ -47,33 +51,31 @@ func ParsePeers(data []byte) ([]peer, error) {
 }
 
 func RetrivePeers(tf *torrentfile.TorrentFile) ([]peer, error) {
-	peerId := GeneratePeerId()
-	tf.PeerId = peerId
+	peerId := tf.PeerId
+	if peerId == [20]byte{} {
+		peerId = GeneratePeerId()
+		tf.PeerId = peerId
+	}
 	url, err := tf.BuildAnnounceURL(peerId, 3100)
 	if err != nil {
-		fmt.Println(err)
 		return nil, err
 	}
 
 	resp, err := http.Get(url)
 	if err != nil {
-		fmt.Println(err)
 		return nil, err
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		fmt.Println(err)
 		return nil, err
 	}
 	data, _, err := bencoding.ParseBencode(body)
 	if err != nil {
-		fmt.Println(err)
 		return nil, err
 	}
 	peers, err := ParsePeers(data.(map[string]any)["peers"].([]byte))
 	if err != nil {
-		fmt.Println(err)
 		return nil, err
 	}
 	return peers, nil
@@ -88,10 +90,9 @@ func GeneratePeerId() [20]byte {
 }
 
 func (p *peer) Connect(tf *torrentfile.TorrentFile) (*peerConnection, error) {
-	conn, err := net.DialTimeout("tcp", p.String(), 10*time.Second)
+	conn, err := net.DialTimeout("tcp", p.String(), 2*time.Second)
 	if err != nil {
-		fmt.Println(err)
-		return nil , err
+		return nil, err
 	}
 	payload := handshake.CreateHandshakePayload(tf)
 	conn.Write(payload)
@@ -99,26 +100,25 @@ func (p *peer) Connect(tf *torrentfile.TorrentFile) (*peerConnection, error) {
 	buffer := make([]byte, 68)
 	_, err = conn.Read(buffer)
 	if err != nil {
-		fmt.Println(err)
-		return nil ,err
+		return nil, err
 	}
 	peerId, ok := handshake.VerifyHandshakePayload(buffer, tf)
 	if !ok {
-		fmt.Println("handshake failed")
-		return nil , fmt.Errorf("handshake failed")
+		return nil, fmt.Errorf("handshake failed")
 	}
 
-	fmt.Println("peer id: ", peerId)
 	return &peerConnection{
-		Peer: *p,
-		Conn: conn,
-		PeerId: peerId,
-		InfoHash: tf.InfoHash,
-		AmChoked: true,
-		PeerChoked: true,
-		AmInterested: false,
+		Tf:             tf,
+		Peer:           *p,
+		Conn:           conn,
+		PeerId:         peerId,
+		InfoHash:       tf.InfoHash,
+		AmChoked:       true,
+		PeerChoked:     true,
+		AmInterested:   false,
 		PeerInterested: false,
-		Bitfield: nil,
+		Bitfield:       bitfield.NewBitfield(int32(tf.Info.Length / tf.Info.PieceLength)),
+		Outgoing:       make(chan *message.Message, 20),
 	}, nil
 }
 
@@ -126,3 +126,100 @@ func (p *peerConnection) Close() error {
 	return p.Conn.Close()
 }
 
+func (p *peerConnection) ReadMessage() (*message.Message, error) {
+	buffer := make([]byte, 4)
+	_, err := p.Conn.Read(buffer)
+	if err != nil {
+		return nil, err
+	}
+	length := binary.BigEndian.Uint32(buffer)
+	buffer = make([]byte, length)
+	_, err = p.Conn.Read(buffer)
+	if err != nil {
+		return nil, err
+	}
+	var payload []byte
+	if length > 1 {
+		payload = buffer[1:]
+	}
+	if length == 0 {
+		return &message.Message{ID: message.MsgKeepAlive}, nil
+	}
+	return &message.Message{
+		ID:   message.MessageID(buffer[0]),
+		Data: payload,
+	}, nil
+}
+
+func (p *peerConnection) WriteMessage(msg *message.Message) error {
+	buffer := msg.Serialize()
+	fmt.Println("writing message : ", buffer)
+	_, err := p.Conn.Write(buffer)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (p *peerConnection) DecodeMessage(msg *message.Message) error {
+	switch msg.ID {
+		case message.MsgChoke:
+			p.AmChoked = true
+		case message.MsgUnchoke:
+			p.AmChoked = false
+			p.Outgoing <- message.Request(p.Bitfield.FirstSetBit(0), 0, int32(16*1024))
+		case message.MsgInterested:
+			p.PeerInterested = true
+			if !p.PeerChoked{
+				p.Outgoing <- message.Unchoke()
+			}
+		case message.MsgNotInterested:
+			p.PeerInterested = false
+		case message.MsgHave:
+			p.Bitfield.Set(msg.GetPieceIndex())
+		case message.MsgBitfield:
+			if len(msg.Data) != len(p.Bitfield) {
+				return fmt.Errorf("invalid bitfield")
+			}
+			copy(p.Bitfield, msg.Data)
+		case message.MsgRequest:
+			// TODO : handle request
+		case message.MsgPiece:
+			// TODO : handle piece
+		case message.MsgCancel:
+			// TODO : handle cancel
+	}
+	return nil
+}
+
+
+func (p *peerConnection) ReadLoop() error {
+	for {
+		// p.Conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+		msg, err := p.ReadMessage()
+		if err != nil {
+			// if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+			// 	return nil
+			// }
+			return err
+		}
+		fmt.Println("Received message : ", msg.ID)
+		p.DecodeMessage(msg)
+	}
+}
+	
+func (p *peerConnection) WriteLoop() error {
+	for {
+		msg, ok := <-p.Outgoing
+		if !ok {
+			break
+		}
+		err := p.WriteMessage(msg)
+		if err != nil {
+			return err
+		}
+
+		fmt.Println("Sent message : ", msg.ID)
+	}
+	return nil
+}

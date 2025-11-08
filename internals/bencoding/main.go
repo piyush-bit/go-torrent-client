@@ -60,7 +60,7 @@ func parseInteger(data []byte) (int64, int, error) {
 	return ans, i+1, nil
 }
 
-func parseList(data []byte) ([]interface{}, int, error) {
+func parseList(data []byte) ([]any, int, error) {
 	if data[0] != 'l' {
 		return nil, 0, fmt.Errorf("invalid list")
 	}
