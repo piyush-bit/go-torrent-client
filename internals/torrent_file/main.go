@@ -4,19 +4,31 @@ import (
 	"bytes"
 	"crypto/sha1"
 	"fmt"
-	bitfield "go-torrent-client/internals/bitfield"
 	"go-torrent-client/internals/bencoding"
+	bitfield "go-torrent-client/internals/bitfield"
+	download "go-torrent-client/internals/download"
 	"net/url"
 	"os"
 	"strconv"
+	"time"
+)
+
+const (
+	WORKING_PIECE_SIZE = 16 * 1024
+	REQUEST_TIMEOUT    = 30 * time.Second
+	MAX_REQUESTS       = 3
+	WORKING_PIECES     = 10
 )
 
 type TorrentFile struct {
-	Info     TorrentInfo
-	Announce string
-	InfoHash [20]byte
-	PeerId   [20]byte
-	Bitfield bitfield.Bitfield
+	Info             TorrentInfo
+	Announce         string
+	InfoHash         [20]byte
+	PeerId           [20]byte
+	Bitfield         bitfield.Bitfield
+	BitfieldLength   int32
+	NeddedPieces     chan *download.Piece
+	DownloadedPieces chan *download.Piece
 }
 
 // using single file for now , will add multiple files later
@@ -82,8 +94,10 @@ func (tf *TorrentFile) ParseTorrentFile(data []byte) error {
 	} else {
 		return fmt.Errorf("invalid torrent file : length not int")
 	}
-
-	tf.Bitfield = bitfield.NewBitfield(int32(tf.Info.Length / tf.Info.PieceLength))
+	tf.NeddedPieces = make(chan *download.Piece, WORKING_PIECES)
+	tf.DownloadedPieces = make(chan *download.Piece, WORKING_PIECES)
+	tf.BitfieldLength = int32(tf.Info.Length / tf.Info.PieceLength)
+	tf.Bitfield = bitfield.NewBitfield(tf.BitfieldLength)
 	return nil
 }
 
@@ -106,15 +120,46 @@ func (tf *TorrentFile) BuildAnnounceURL(peerId [20]byte, port int) (string, erro
 		return "", err
 	}
 	params := url.Values{
-		"info_hash": {string(tf.InfoHash[:])},
-		"peer_id":   {string(peerId[:])},
-		"port":      {strconv.Itoa(port)},
-		"uploaded":  {"0"},
+		"info_hash":  {string(tf.InfoHash[:])},
+		"peer_id":    {string(peerId[:])},
+		"port":       {strconv.Itoa(port)},
+		"uploaded":   {"0"},
 		"downloaded": {"0"},
-		"left": {strconv.FormatInt(tf.Info.Length, 10)},
-		"compact":   {"1"},
-		"event":     {"started"},
+		"left":       {strconv.FormatInt(tf.Info.Length, 10)},
+		"compact":    {"1"},
+		"event":      {"started"},
 	}
 	u.RawQuery = params.Encode()
 	return u.String(), nil
 }
+
+func (tf *TorrentFile) UpdateNeddedPieces() {
+	i := 1
+	for i < int(tf.BitfieldLength) {
+		piece := download.NewPiece(int32(i), int(tf.Info.PieceLength), WORKING_PIECE_SIZE)
+		tf.NeddedPieces <- piece
+		fmt.Println("Piece added to nedded pieces :", piece.Index)
+		i++
+	}
+}
+
+func (tf *TorrentFile) UpdateDownloadedPieces() {
+	dowloadedPiece := <-tf.DownloadedPieces
+	if tf.Bitfield.Test(dowloadedPiece.Index) {
+		fmt.Println("Piece already downloaded :", dowloadedPiece.Index)
+		return
+	}
+	var hash [20]byte
+	copy(hash[:], tf.Info.Pieces[dowloadedPiece.Index*20:(dowloadedPiece.Index+1)*20])
+	//verify sha-1
+	if dowloadedPiece.Verify(hash) {
+		tf.Bitfield.Set(dowloadedPiece.Index)
+		fmt.Println("Piece downloaded :", dowloadedPiece.Index)
+	} else {
+		fmt.Println("Piece verification failed :", dowloadedPiece.Index)
+		dowloadedPiece.Clear()
+		tf.NeddedPieces <- dowloadedPiece
+	}
+}
+	
+

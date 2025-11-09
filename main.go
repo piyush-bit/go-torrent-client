@@ -30,6 +30,8 @@ func main() {
 	fmt.Println("Connected to peer")
 	defer peerConnection.Close()
 	errChan := make(chan error)
+	go tf.UpdateNeddedPieces()
+	go tf.UpdateDownloadedPieces()
 	go func() {
 		err := peerConnection.ReadLoop()
 		errChan <- err
@@ -40,9 +42,9 @@ func main() {
 		errChan <- err
 		fmt.Println("Write loop done : ", err)
 	}()
+
 	peerConnection.Outgoing <- message.Bitfield(peerConnection.Tf.Bitfield)
 	peerConnection.Outgoing <- message.Interested()
-
 	<-errChan
 
 }

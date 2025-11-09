@@ -6,15 +6,18 @@ import (
 	"fmt"
 	handshake "go-torrent-client/internals/Handshake"
 	"go-torrent-client/internals/bencoding"
-	torrentfile "go-torrent-client/internals/torrent_file"
 	bitfield "go-torrent-client/internals/bitfield"
+	download "go-torrent-client/internals/download"
 	message "go-torrent-client/internals/message"
+	torrentfile "go-torrent-client/internals/torrent_file"
 	"io"
 	"net"
 	"net/http"
 	"strconv"
 	"time"
 )
+
+
 
 type peer struct {
 	ip   string
@@ -33,6 +36,9 @@ type peerConnection struct {
 	PeerInterested bool
 	Bitfield       bitfield.Bitfield
 	Outgoing       chan *message.Message
+	workingPiece   *download.Piece
+	chokedSignal   chan bool
+	ScheduledRetry []*time.Timer
 }
 
 func (p *peer) String() string {
@@ -119,6 +125,8 @@ func (p *peer) Connect(tf *torrentfile.TorrentFile) (*peerConnection, error) {
 		PeerInterested: false,
 		Bitfield:       bitfield.NewBitfield(int32(tf.Info.Length / tf.Info.PieceLength)),
 		Outgoing:       make(chan *message.Message, 20),
+		chokedSignal:   make(chan bool),
+		ScheduledRetry: []*time.Timer{},
 	}, nil
 }
 
@@ -127,28 +135,26 @@ func (p *peerConnection) Close() error {
 }
 
 func (p *peerConnection) ReadMessage() (*message.Message, error) {
-	buffer := make([]byte, 4)
-	_, err := p.Conn.Read(buffer)
-	if err != nil {
+	header := make([]byte, 4)
+	if _, err := io.ReadFull(p.Conn, header); err != nil {
 		return nil, err
 	}
-	length := binary.BigEndian.Uint32(buffer)
-	buffer = make([]byte, length)
-	_, err = p.Conn.Read(buffer)
-	if err != nil {
-		return nil, err
-	}
-	var payload []byte
-	if length > 1 {
-		payload = buffer[1:]
-	}
+	length := binary.BigEndian.Uint32(header)
 	if length == 0 {
 		return &message.Message{ID: message.MsgKeepAlive}, nil
 	}
-	return &message.Message{
-		ID:   message.MessageID(buffer[0]),
-		Data: payload,
-	}, nil
+	body := make([]byte, length)
+	if _, err := io.ReadFull(p.Conn, body); err != nil {
+		return nil, err
+	}
+	
+	msg := &message.Message{
+		ID: message.MessageID(body[0]),
+	}
+	if len(body) > 1 {
+		msg.Data = body[1:]
+	}
+	return msg, nil
 }
 
 func (p *peerConnection) WriteMessage(msg *message.Message) error {
@@ -162,36 +168,69 @@ func (p *peerConnection) WriteMessage(msg *message.Message) error {
 }
 
 func (p *peerConnection) DecodeMessage(msg *message.Message) error {
+
 	switch msg.ID {
-		case message.MsgChoke:
-			p.AmChoked = true
-		case message.MsgUnchoke:
-			p.AmChoked = false
-			p.Outgoing <- message.Request(p.Bitfield.FirstSetBit(0), 0, int32(16*1024))
-		case message.MsgInterested:
-			p.PeerInterested = true
-			if !p.PeerChoked{
-				p.Outgoing <- message.Unchoke()
-			}
-		case message.MsgNotInterested:
-			p.PeerInterested = false
-		case message.MsgHave:
-			p.Bitfield.Set(msg.GetPieceIndex())
-		case message.MsgBitfield:
-			if len(msg.Data) != len(p.Bitfield) {
-				return fmt.Errorf("invalid bitfield")
-			}
-			copy(p.Bitfield, msg.Data)
-		case message.MsgRequest:
-			// TODO : handle request
-		case message.MsgPiece:
-			// TODO : handle piece
-		case message.MsgCancel:
-			// TODO : handle cancel
+	case message.MsgChoke:
+		p.AmChoked = true
+		p.chokedSignal <- true
+	case message.MsgUnchoke:
+		p.AmChoked = false
+		go p.FindWork()
+	case message.MsgInterested:
+		p.PeerInterested = true
+		if !p.PeerChoked {
+			p.Outgoing <- message.Unchoke()
+		}
+	case message.MsgNotInterested:
+		p.PeerInterested = false
+	case message.MsgHave:
+		p.Bitfield.Set(msg.GetPieceIndex())
+	case message.MsgBitfield:
+		if len(msg.Data) != len(p.Bitfield) {
+			return fmt.Errorf("invalid bitfield")
+		}
+		copy(p.Bitfield, msg.Data)
+	case message.MsgRequest:
+		// TODO : handle request
+	case message.MsgPiece:
+		// MsgPiece: <len=9+X><id=7><index><begin><block>
+		if len(msg.Data) < 8 {
+			return fmt.Errorf("piece message too short: %d", len(msg.Data))
+		}
+		index := binary.BigEndian.Uint32(msg.Data[0:4])
+		offset := binary.BigEndian.Uint32(msg.Data[4:8])
+		data := msg.Data[8:] // rest is block payload
+
+		fmt.Println("Piece received header: index=", index, " begin=", offset, " dataLen=", len(data))
+
+		if p.workingPiece == nil {
+			return fmt.Errorf("received piece with no workingPiece set")
+		}
+		if index != uint32(p.workingPiece.Index) {
+			return fmt.Errorf("invalid piece index: got %d expected %d", index, p.workingPiece.Index)
+		}
+
+		// Validate offset and bounds against current piece size (torrent piece length)
+		pieceSize := int(p.Tf.Info.PieceLength)
+		if int(offset) < 0 || int(offset) >= pieceSize {
+			return fmt.Errorf("invalid piece offset: %d (pieceSize=%d)", offset, pieceSize)
+		}
+		if len(data) == 0 {
+			return fmt.Errorf("empty piece block received")
+		}
+		if int(offset)+len(data) > pieceSize {
+			return fmt.Errorf("piece block exceeds piece size: offset=%d len=%d pieceSize=%d", offset, len(data), pieceSize)
+		}
+
+		// Write block and mark corresponding chunk as received
+		p.workingPiece.WriteData(int32(offset), data)
+		p.workingPiece.SetReceived(int(offset / torrentfile.WORKING_PIECE_SIZE))
+
+	case message.MsgCancel:
+		// TODO : handle cancel
 	}
 	return nil
 }
-
 
 func (p *peerConnection) ReadLoop() error {
 	for {
@@ -204,10 +243,13 @@ func (p *peerConnection) ReadLoop() error {
 			return err
 		}
 		fmt.Println("Received message : ", msg.ID)
-		p.DecodeMessage(msg)
+		err = p.DecodeMessage(msg)
+		if err != nil {
+			fmt.Println("Error decoding message : ", err)
+		}
 	}
 }
-	
+
 func (p *peerConnection) WriteLoop() error {
 	for {
 		msg, ok := <-p.Outgoing
@@ -222,4 +264,49 @@ func (p *peerConnection) WriteLoop() error {
 		fmt.Println("Sent message : ", msg.ID)
 	}
 	return nil
+}
+
+func (p *peerConnection) FindWork() error {
+	for {
+		select {
+		case <-p.chokedSignal:
+			if p.workingPiece == nil {
+				return nil
+			}
+			p.workingPiece.ClearRequested()
+			p.Tf.NeddedPieces <- p.workingPiece
+			p.workingPiece = nil
+			for _, retry := range p.ScheduledRetry {
+				retry.Stop()
+			}
+			p.ScheduledRetry = []*time.Timer{}
+		default:
+			if p.workingPiece == nil {
+				piece := <-p.Tf.NeddedPieces
+				if !p.Bitfield.Test(piece.Index) {
+					p.Tf.NeddedPieces <- piece
+					continue
+				}
+				p.workingPiece = piece
+				fmt.Println("Piece added to working piece :", piece.Index)
+		}
+		empty, requested, _ := p.workingPiece.Status()
+			if requested < torrentfile.MAX_REQUESTS {
+				for i := 0; i < min(empty, torrentfile.MAX_REQUESTS-requested); i++ {
+					index := p.workingPiece.GetEmptyIndex()
+					p.Outgoing <- message.Request(p.workingPiece.Index, int32(index*torrentfile.WORKING_PIECE_SIZE), int32(torrentfile.WORKING_PIECE_SIZE))
+					p.workingPiece.SetRequested(index)
+					idx := index
+					retry := time.AfterFunc(torrentfile.REQUEST_TIMEOUT, func() {
+						p.workingPiece.UnsetRequested(idx)
+					})
+					p.ScheduledRetry = append(p.ScheduledRetry, retry)
+				}
+			}
+			if p.workingPiece.IsComplete() {
+				p.Tf.DownloadedPieces <- p.workingPiece
+				p.workingPiece = nil
+			}
+		}
+	}
 }

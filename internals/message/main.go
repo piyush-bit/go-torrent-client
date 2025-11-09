@@ -87,8 +87,8 @@ func Bitfield(bitfield []byte) *Message {
 func Request(index int32, begin int32, length int32) *Message {
 	buf := make([]byte, 12)
 	binary.BigEndian.PutUint32(buf, uint32(index))
-	binary.BigEndian.PutUint32(buf[4:], uint32(begin))
-	binary.BigEndian.PutUint32(buf[8:], uint32(length))
+	binary.BigEndian.PutUint32(buf[4:8], uint32(begin))
+	binary.BigEndian.PutUint32(buf[8:12], uint32(length))
 	return &Message{
 		ID:   MsgRequest,
 		Data: buf,
