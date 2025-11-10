@@ -17,8 +17,6 @@ import (
 	"time"
 )
 
-
-
 type peer struct {
 	ip   string
 	port int
@@ -147,7 +145,7 @@ func (p *peerConnection) ReadMessage() (*message.Message, error) {
 	if _, err := io.ReadFull(p.Conn, body); err != nil {
 		return nil, err
 	}
-	
+
 	msg := &message.Message{
 		ID: message.MessageID(body[0]),
 	}
@@ -159,7 +157,6 @@ func (p *peerConnection) ReadMessage() (*message.Message, error) {
 
 func (p *peerConnection) WriteMessage(msg *message.Message) error {
 	buffer := msg.Serialize()
-	fmt.Println("writing message : ", buffer)
 	_, err := p.Conn.Write(buffer)
 	if err != nil {
 		return err
@@ -201,7 +198,7 @@ func (p *peerConnection) DecodeMessage(msg *message.Message) error {
 		offset := binary.BigEndian.Uint32(msg.Data[4:8])
 		data := msg.Data[8:] // rest is block payload
 
-		fmt.Println("Piece received header: index=", index, " begin=", offset, " dataLen=", len(data))
+		// fmt.Println("Piece received header: index=", index, " begin=", offset, " dataLen=", len(data))
 
 		if p.workingPiece == nil {
 			return fmt.Errorf("received piece with no workingPiece set")
@@ -224,7 +221,7 @@ func (p *peerConnection) DecodeMessage(msg *message.Message) error {
 
 		// Write block and mark corresponding chunk as received
 		p.workingPiece.WriteData(int32(offset), data)
-		p.workingPiece.SetReceived(int(offset / torrentfile.WORKING_PIECE_SIZE))
+		p.workingPiece.SetReceived(int(offset / torrentfile.DOWNLOAD_BUFFER_SIZE))
 
 	case message.MsgCancel:
 		// TODO : handle cancel
@@ -242,7 +239,7 @@ func (p *peerConnection) ReadLoop() error {
 			// }
 			return err
 		}
-		fmt.Println("Received message : ", msg.ID)
+		// fmt.Println("Received message : ", msg.ID)
 		err = p.DecodeMessage(msg)
 		if err != nil {
 			fmt.Println("Error decoding message : ", err)
@@ -261,7 +258,7 @@ func (p *peerConnection) WriteLoop() error {
 			return err
 		}
 
-		fmt.Println("Sent message : ", msg.ID)
+		// fmt.Println("Sent message : ", msg.ID)
 	}
 	return nil
 }
@@ -270,40 +267,69 @@ func (p *peerConnection) FindWork() error {
 	for {
 		select {
 		case <-p.chokedSignal:
-			if p.workingPiece == nil {
-				return nil
+			// On choke: if we were working on a piece, put it back and reset.
+			if p.workingPiece != nil {
+				p.workingPiece.ClearRequested()
+				p.Tf.NeddedPieces <- p.workingPiece
+				p.workingPiece = nil
 			}
-			p.workingPiece.ClearRequested()
-			p.Tf.NeddedPieces <- p.workingPiece
-			p.workingPiece = nil
 			for _, retry := range p.ScheduledRetry {
 				retry.Stop()
 			}
 			p.ScheduledRetry = []*time.Timer{}
+
 		default:
+			// Ensure we have a workingPiece; block until there is valid work.
 			if p.workingPiece == nil {
 				piece := <-p.Tf.NeddedPieces
+
+				// Defensive: skip nil pieces so we never call methods on nil.
+				if piece == nil {
+					continue
+				}
 				if !p.Bitfield.Test(piece.Index) {
 					p.Tf.NeddedPieces <- piece
 					continue
 				}
+
 				p.workingPiece = piece
-				fmt.Println("Piece added to working piece :", piece.Index)
-		}
-		empty, requested, _ := p.workingPiece.Status()
+				// fmt.Println("Piece added to working piece :", piece.Index)
+			}
+
+			// If after assignment we still don't have a piece, start next loop.
+			if p.workingPiece == nil {
+				continue
+			}
+
+			empty, requested, _ := p.workingPiece.Status()
 			if requested < torrentfile.MAX_REQUESTS {
-				for i := 0; i < min(empty, torrentfile.MAX_REQUESTS-requested); i++ {
+				maxNew := min(empty, torrentfile.MAX_REQUESTS-requested)
+				for range maxNew {
 					index := p.workingPiece.GetEmptyIndex()
-					p.Outgoing <- message.Request(p.workingPiece.Index, int32(index*torrentfile.WORKING_PIECE_SIZE), int32(torrentfile.WORKING_PIECE_SIZE))
+					if index == -1 {
+						break
+					}
+
+					p.Outgoing <- message.Request(
+						p.workingPiece.Index,
+						int32(index*torrentfile.DOWNLOAD_BUFFER_SIZE),
+						int32(torrentfile.DOWNLOAD_BUFFER_SIZE),
+					)
 					p.workingPiece.SetRequested(index)
+
 					idx := index
 					retry := time.AfterFunc(torrentfile.REQUEST_TIMEOUT, func() {
-						p.workingPiece.UnsetRequested(idx)
+						// Guard against nil in retry callback
+						if p.workingPiece != nil {
+							p.workingPiece.UnsetRequested(idx)
+						}
 					})
 					p.ScheduledRetry = append(p.ScheduledRetry, retry)
 				}
 			}
-			if p.workingPiece.IsComplete() {
+
+			// Guard IsComplete with nil check to prevent panic.
+			if p.workingPiece != nil && p.workingPiece.IsComplete() {
 				p.Tf.DownloadedPieces <- p.workingPiece
 				p.workingPiece = nil
 			}

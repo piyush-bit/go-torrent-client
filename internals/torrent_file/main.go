@@ -14,10 +14,10 @@ import (
 )
 
 const (
-	WORKING_PIECE_SIZE = 16 * 1024
-	REQUEST_TIMEOUT    = 30 * time.Second
-	MAX_REQUESTS       = 3
-	WORKING_PIECES     = 10
+	DOWNLOAD_BUFFER_SIZE = 16 * 1024
+	REQUEST_TIMEOUT      = 30 * time.Second
+	MAX_REQUESTS         = 5
+	WORKING_PIECES       = 20
 )
 
 type TorrentFile struct {
@@ -29,6 +29,8 @@ type TorrentFile struct {
 	BitfieldLength   int32
 	NeddedPieces     chan *download.Piece
 	DownloadedPieces chan *download.Piece
+	notifyDownload   chan bool
+	Download         *download.Download
 }
 
 // using single file for now , will add multiple files later
@@ -98,6 +100,9 @@ func (tf *TorrentFile) ParseTorrentFile(data []byte) error {
 	tf.DownloadedPieces = make(chan *download.Piece, WORKING_PIECES)
 	tf.BitfieldLength = int32(tf.Info.Length / tf.Info.PieceLength)
 	tf.Bitfield = bitfield.NewBitfield(tf.BitfieldLength)
+	tf.notifyDownload = make(chan bool, 2)
+	tf.notifyDownload <- false
+	tf.Download = download.NewDownload(uint32(tf.Info.Length), tf.Info.Name)
 	return nil
 }
 
@@ -134,32 +139,45 @@ func (tf *TorrentFile) BuildAnnounceURL(peerId [20]byte, port int) (string, erro
 }
 
 func (tf *TorrentFile) UpdateNeddedPieces() {
-	i := 1
-	for i < int(tf.BitfieldLength) {
-		piece := download.NewPiece(int32(i), int(tf.Info.PieceLength), WORKING_PIECE_SIZE)
-		tf.NeddedPieces <- piece
-		fmt.Println("Piece added to nedded pieces :", piece.Index)
-		i++
+	i := tf.BitfieldLength - 1
+	for {
+		increment := <-tf.notifyDownload
+		if !increment {
+			init := i
+			for i > init-WORKING_PIECES && i >= 0 {
+				piece := download.NewPiece(int32(i), int(tf.Info.PieceLength), DOWNLOAD_BUFFER_SIZE)
+				tf.NeddedPieces <- piece
+				fmt.Println("Piece added to nedded pieces :", piece.Index)
+				i--
+			}
+		} else {
+			piece := download.NewPiece(int32(i), int(tf.Info.PieceLength), DOWNLOAD_BUFFER_SIZE)
+			tf.NeddedPieces <- piece
+			fmt.Println("Piece added to nedded pieces :", piece.Index)
+			i--
+		}
 	}
 }
 
 func (tf *TorrentFile) UpdateDownloadedPieces() {
-	dowloadedPiece := <-tf.DownloadedPieces
-	if tf.Bitfield.Test(dowloadedPiece.Index) {
-		fmt.Println("Piece already downloaded :", dowloadedPiece.Index)
-		return
-	}
-	var hash [20]byte
-	copy(hash[:], tf.Info.Pieces[dowloadedPiece.Index*20:(dowloadedPiece.Index+1)*20])
-	//verify sha-1
-	if dowloadedPiece.Verify(hash) {
-		tf.Bitfield.Set(dowloadedPiece.Index)
-		fmt.Println("Piece downloaded :", dowloadedPiece.Index)
-	} else {
-		fmt.Println("Piece verification failed :", dowloadedPiece.Index)
-		dowloadedPiece.Clear()
-		tf.NeddedPieces <- dowloadedPiece
+	for {
+		dowloadedPiece := <-tf.DownloadedPieces
+		if tf.Bitfield.Test(dowloadedPiece.Index) {
+			fmt.Println("Piece already downloaded :", dowloadedPiece.Index)
+			return
+		}
+		var hash [20]byte
+		copy(hash[:], tf.Info.Pieces[dowloadedPiece.Index*20:(dowloadedPiece.Index+1)*20])
+		//verify sha-1
+		if dowloadedPiece.Verify(hash) {
+			tf.Download.WritePiece(dowloadedPiece.Index, dowloadedPiece.Data)
+			tf.Bitfield.Set(dowloadedPiece.Index)
+			fmt.Println("Piece downloaded :", dowloadedPiece.Index)
+			tf.notifyDownload <- true
+		} else {
+			fmt.Println("Piece verification failed :", dowloadedPiece.Index)
+			dowloadedPiece.Clear()
+			tf.NeddedPieces <- dowloadedPiece
+		}
 	}
 }
-	
-

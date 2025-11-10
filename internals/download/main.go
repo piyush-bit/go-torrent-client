@@ -1,34 +1,63 @@
 package download
 
-import "crypto/sha1"
+import (
+	"crypto/sha1"
+	"fmt"
+	"os"
+)
 
 type Download struct {
-	file []byte
+	file *os.File
+}
+
+func NewDownload(length uint32, location string) *Download {
+	f, err := os.Create(location)
+	if err != nil {
+		panic(fmt.Errorf("failed to create file: %w", err))
+	}
+	if _, err := f.Seek(int64(length-1), 0); err != nil {
+		f.Close()
+		panic(fmt.Errorf("failed to seek: %w", err))
+	}
+	if _, err := f.Write([]byte{0}); err != nil {
+		f.Close()
+		panic(fmt.Errorf("failed to write last byte: %w", err))
+	}
+	return &Download{file: f}
+}
+
+func (d *Download) Close() error {
+	return d.file.Close()
+}
+
+func (d *Download) WritePiece(index int32, data []byte) error {
+	_, err := d.file.WriteAt(data, int64(index))
+	return err
 }
 
 type Piece struct {
 	Index        int32
-	data         []byte
+	Data         []byte
 	bufferStatus []int8 // 0:empty , 1:requested , 2:received
 }
 
 func NewPiece(index int32, pieceLength int, bufferSize int) *Piece {
 	return &Piece{
 		Index:        index,
-		data:         make([]byte, pieceLength),
+		Data:         make([]byte, pieceLength),
 		bufferStatus: make([]int8, (pieceLength-1)/bufferSize+1),
 	}
 }
 
 func (p *Piece) WriteData(index int32, data []byte) {
-	copy(p.data[index:], data)
+	copy(p.Data[index:], data)
 }
 
 func (p *Piece) Verify(hash [20]byte) bool {
-	return sha1.Sum(p.data) == hash
+	return sha1.Sum(p.Data) == hash
 }
 
-func (p *Piece) Clear(){
+func (p *Piece) Clear() {
 	for i := 0; i < len(p.bufferStatus); i++ {
 		p.bufferStatus[i] = 0
 	}
@@ -86,15 +115,4 @@ func (p *Piece) GetEmptyIndex() int {
 		}
 	}
 	return -1
-}
-
-func NewDownload(length int64) *Download {
-	return &Download{
-		file: make([]byte, length),
-	}
-}
-
-func (d *Download) WritePiece(index int32, data []byte) error {
-	copy(d.file[index:], data)
-	return nil
 }
