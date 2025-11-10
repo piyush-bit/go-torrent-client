@@ -140,7 +140,7 @@ func (tf *TorrentFile) BuildAnnounceURL(peerId [20]byte, port int) (string, erro
 
 func (tf *TorrentFile) UpdateNeddedPieces() {
 	i := tf.BitfieldLength - 1
-	for {
+	for i >= 0 {
 		increment := <-tf.notifyDownload
 		if !increment {
 			init := i

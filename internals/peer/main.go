@@ -130,6 +130,31 @@ func (p *peer) Connect(tf *torrentfile.TorrentFile) (*peerConnection, error) {
 	}, nil
 }
 
+func (p *peer) SpawnPeer(tf *torrentfile.TorrentFile) {
+	peerConnection, err := p.Connect(tf)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	fmt.Println("Connected to peer")
+	defer peerConnection.Close()
+	errChan := make(chan error)
+	go func() {
+		err := peerConnection.ReadLoop()
+		fmt.Println("Read loop done : ", err)
+		errChan <- err
+	}()
+	go func() {
+		err := peerConnection.WriteLoop()
+		fmt.Println("Write loop done : ", err)
+		errChan <- err
+	}()
+
+	peerConnection.Outgoing <- message.Bitfield(peerConnection.Tf.Bitfield)
+	peerConnection.Outgoing <- message.Interested()
+	<-errChan
+}
+
 func (p *peerConnection) Close() error {
 	return p.Conn.Close()
 }
