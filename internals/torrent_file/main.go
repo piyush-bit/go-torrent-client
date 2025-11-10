@@ -15,7 +15,7 @@ import (
 
 const (
 	DOWNLOAD_BUFFER_SIZE = 16 * 1024
-	REQUEST_TIMEOUT      = 30 * time.Second
+	REQUEST_TIMEOUT      = 60 * time.Second
 	MAX_REQUESTS         = 5
 	WORKING_PIECES       = 20
 )

@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -37,6 +38,7 @@ type peerConnection struct {
 	workingPiece   *download.Piece
 	chokedSignal   chan bool
 	ScheduledRetry []*time.Timer
+	workingPieceMu sync.Mutex
 }
 
 func (p *peer) String() string {
@@ -191,6 +193,8 @@ func (p *peerConnection) DecodeMessage(msg *message.Message) error {
 		// TODO : handle request
 	case message.MsgPiece:
 		// MsgPiece: <len=9+X><id=7><index><begin><block>
+		p.workingPieceMu.Lock()
+		defer p.workingPieceMu.Unlock()
 		if len(msg.Data) < 8 {
 			return fmt.Errorf("piece message too short: %d", len(msg.Data))
 		}
@@ -268,6 +272,8 @@ func (p *peerConnection) FindWork() error {
 		select {
 		case <-p.chokedSignal:
 			// On choke: if we were working on a piece, put it back and reset.
+			p.workingPieceMu.Lock()
+			
 			if p.workingPiece != nil {
 				p.workingPiece.ClearRequested()
 				p.Tf.NeddedPieces <- p.workingPiece
@@ -277,28 +283,27 @@ func (p *peerConnection) FindWork() error {
 				retry.Stop()
 			}
 			p.ScheduledRetry = []*time.Timer{}
+			p.workingPieceMu.Unlock()
 
 		default:
 			// Ensure we have a workingPiece; block until there is valid work.
+			p.workingPieceMu.Lock()
 			if p.workingPiece == nil {
 				piece := <-p.Tf.NeddedPieces
 
 				// Defensive: skip nil pieces so we never call methods on nil.
 				if piece == nil {
+					p.workingPieceMu.Unlock()
 					continue
 				}
 				if !p.Bitfield.Test(piece.Index) {
 					p.Tf.NeddedPieces <- piece
+					p.workingPieceMu.Unlock()
 					continue
 				}
 
 				p.workingPiece = piece
 				// fmt.Println("Piece added to working piece :", piece.Index)
-			}
-
-			// If after assignment we still don't have a piece, start next loop.
-			if p.workingPiece == nil {
-				continue
 			}
 
 			empty, requested, _ := p.workingPiece.Status()
@@ -318,11 +323,14 @@ func (p *peerConnection) FindWork() error {
 					p.workingPiece.SetRequested(index)
 
 					idx := index
+					currPiece := p.workingPiece
 					retry := time.AfterFunc(torrentfile.REQUEST_TIMEOUT, func() {
 						// Guard against nil in retry callback
-						if p.workingPiece != nil {
+						p.workingPieceMu.Lock()
+						if p.workingPiece != nil && p.workingPiece.Index == currPiece.Index {
 							p.workingPiece.UnsetRequested(idx)
 						}
+						p.workingPieceMu.Unlock()
 					})
 					p.ScheduledRetry = append(p.ScheduledRetry, retry)
 				}
@@ -333,6 +341,7 @@ func (p *peerConnection) FindWork() error {
 				p.Tf.DownloadedPieces <- p.workingPiece
 				p.workingPiece = nil
 			}
+			p.workingPieceMu.Unlock()
 		}
 	}
 }
