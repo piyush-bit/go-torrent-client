@@ -1,2 +1,5 @@
 go-torrent-client
 tor.torrent
+bin
+output.txt
+.vscode

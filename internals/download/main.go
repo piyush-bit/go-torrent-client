@@ -27,6 +27,14 @@ func NewDownload(length uint32, location string) *Download {
 	return &Download{file: f}
 }
 
+func NewDownloadFromExistingFile(location string) *Download {
+	f, err := os.OpenFile(location, os.O_RDWR|os.O_CREATE, 0644)
+	if err != nil {
+		panic(fmt.Errorf("failed to open file: %w", err))
+	}
+	return &Download{file: f}
+}
+
 func (d *Download) Close() error {
 	return d.file.Close()
 }
@@ -34,6 +42,27 @@ func (d *Download) Close() error {
 func (d *Download) WritePiece(index int32, data []byte) error {
 	_, err := d.file.WriteAt(data, int64(index))
 	return err
+}
+
+func (d *Download) GetPiece(index int32,length int32) ([]byte, error) {
+	data := make([]byte, length) 
+	_, err := d.file.ReadAt(data, int64(index))
+	if err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
+func (d *Download) GetFile() *os.File {
+	return d.file
+}
+
+func (d *Download) Sync() error {
+    return d.file.Sync()
+}
+
+func (d *Download) Save() error {
+	return d.file.Close()
 }
 
 type Piece struct {
@@ -136,4 +165,8 @@ func (p *Piece) GetEmptyIndex() int {
 		}
 	}
 	return -1
+}
+
+func (p *Piece) GetTotalBufferLen() int {
+	return len(p.bufferStatus)
 }

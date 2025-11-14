@@ -123,18 +123,18 @@ func (p *peer) Connect(tf *torrentfile.TorrentFile) (*peerConnection, error) {
 		PeerChoked:     true,
 		AmInterested:   false,
 		PeerInterested: false,
-		Bitfield:       bitfield.NewBitfield(int32(tf.Info.Length / tf.Info.PieceLength)),
+		Bitfield:       bitfield.NewBitfield(int32(len(tf.Info.Pieces) / 20)),
 		Outgoing:       make(chan *message.Message, 20),
 		chokedSignal:   make(chan bool),
 		ScheduledRetry: []*time.Timer{},
 	}, nil
 }
 
-func (p *peer) SpawnPeer(tf *torrentfile.TorrentFile) {
+func (p *peer) SpawnPeer(tf *torrentfile.TorrentFile) error {
 	peerConnection, err := p.Connect(tf)
 	if err != nil {
 		fmt.Println(err)
-		return
+		return err
 	}
 	fmt.Println("Connected to peer")
 	defer peerConnection.Close()
@@ -152,7 +152,7 @@ func (p *peer) SpawnPeer(tf *torrentfile.TorrentFile) {
 
 	peerConnection.Outgoing <- message.Bitfield(peerConnection.Tf.Bitfield)
 	peerConnection.Outgoing <- message.Interested()
-	<-errChan
+	return <-errChan
 }
 
 func (p *peerConnection) Close() error {
@@ -315,20 +315,18 @@ func (p *peerConnection) FindWork() error {
 			p.workingPieceMu.Lock()
 			if p.workingPiece == nil {
 				piece := <-p.Tf.NeddedPieces
-
-				// Defensive: skip nil pieces so we never call methods on nil.
-				if piece == nil {
-					p.workingPieceMu.Unlock()
-					continue
-				}
+				fmt.Printf("Piece %d picked by peer %s\n", piece.Index, p.Peer.String())
 				if !p.Bitfield.Test(piece.Index) {
 					p.Tf.NeddedPieces <- piece
 					p.workingPieceMu.Unlock()
+					// fmt.Printf("Bitfield of :%s\n%v\n", p.Peer.String(), p.Bitfield)
+					// return nil
+					time.Sleep(time.Second)
 					continue
 				}
 
 				p.workingPiece = piece
-				// fmt.Println("Piece added to working piece :", piece.Index)
+				// fmt.Printf("Piece %d picked by peer %s\n", piece.Index, p.Peer.String())
 			}
 
 			empty, requested, _ := p.workingPiece.Status()
@@ -339,11 +337,18 @@ func (p *peerConnection) FindWork() error {
 					if index == -1 {
 						break
 					}
-
+					bufferSize := torrentfile.DOWNLOAD_BUFFER_SIZE
+					if index == p.workingPiece.GetTotalBufferLen() -1 {
+						bufferSize = len(p.workingPiece.Data) % torrentfile.DOWNLOAD_BUFFER_SIZE
+						if bufferSize == 0 {
+							bufferSize = torrentfile.DOWNLOAD_BUFFER_SIZE
+						}
+					}
+						
 					p.Outgoing <- message.Request(
 						p.workingPiece.Index,
 						int32(index*torrentfile.DOWNLOAD_BUFFER_SIZE),
-						int32(torrentfile.DOWNLOAD_BUFFER_SIZE),
+						int32(bufferSize),
 					)
 					p.workingPiece.SetRequested(index)
 
@@ -364,6 +369,7 @@ func (p *peerConnection) FindWork() error {
 			// Guard IsComplete with nil check to prevent panic.
 			if p.workingPiece != nil && p.workingPiece.IsComplete() {
 				p.Tf.DownloadedPieces <- p.workingPiece
+				fmt.Printf("Piece %d downloaded by peer %s, len(%d)\n", p.workingPiece.Index, p.Peer.String(), len(p.Tf.DownloadedPieces))
 				p.workingPiece = nil
 			}
 			p.workingPieceMu.Unlock()
