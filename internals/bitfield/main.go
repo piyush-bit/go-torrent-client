@@ -14,6 +14,34 @@ func (b Bitfield) SetAll() {
 	}
 }
 
+func (b Bitfield) IsAllSet(bitfieldLength int32) bool {
+    totalBytes := (bitfieldLength + 7) / 8
+
+    for i := int32(0); i < totalBytes; i++ {
+        isLast := (i == totalBytes-1)
+
+        if !isLast {
+            if b[i] != 0xFF {
+                return false
+            }
+            continue
+        }
+
+        remainingBits := bitfieldLength % 8
+        if remainingBits == 0 {
+            return b[i] == 0xFF
+        }
+
+        for j := 0; j < int(remainingBits); j++ {
+            if b[i]&(1<<(7-j)) == 0 {
+                return false
+            }
+        }
+    }
+    return true
+}
+
+
 func (b Bitfield) Set(index int32) {
     b[index/8] |= 1 << (7 - (index % 8))
 }

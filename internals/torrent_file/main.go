@@ -352,7 +352,7 @@ func (tf *TorrentFile) UpdateDownloadedPieces() {
 			fmt.Printf("Piece %d verified and saved\n", dowloadedPiece.Index)
 			tf.notifyDownload <- true
 			count++
-			if count == tf.BitfieldLength {
+			if tf.Bitfield.IsAllSet(tf.BitfieldLength) {
 				fmt.Println("All pieces downloaded, signaling completion")
 				tf.DownloadComplete <- true
 				return
