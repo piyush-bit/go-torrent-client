@@ -1,5 +1,5 @@
 go-torrent-client
-tor.torrent
+*.torrent
 bin
 output.txt
 .vscode
