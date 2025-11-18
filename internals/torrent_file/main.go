@@ -7,8 +7,10 @@ import (
 	"go-torrent-client/internals/bencoding"
 	bitfield "go-torrent-client/internals/bitfield"
 	download "go-torrent-client/internals/download"
+	"io"
 	"net/url"
 	"os"
+	"reflect"
 	"strconv"
 	"time"
 )
@@ -158,32 +160,45 @@ func (tf *TorrentFile) ParseTorrentField(data []byte) error {
 	}
 	if length, ok := info["length"].(int64); ok {
 		tf.Info.Length = length
+		if _, err := os.Stat(tf.Info.Name); err == nil {
+			tf.Bitfield.SetAll()
+			if d, err := download.NewDownloadFromExistingFile(tf.Info.Name); err != nil {
+				return err
+			} else {
+				tf.Download = d
+			}
+			err := VerifyFileIntegrity(tf.Download.GetFile(), tf, &tf.Bitfield)
+			if err != nil {
+				return err
+			}
+		} else {
+			tf.Download = download.NewDownload(uint32(tf.Info.Length), tf.Info.Name)
+		}
 	} else {
-		return fmt.Errorf("invalid torrent file : length not int")
+		files, ok := info["files"].([]any)
+		if !ok {
+			fmt.Println("Type of files is ", reflect.TypeOf(files))
+
+			return fmt.Errorf("invalid torrent file : files not array")
+		}
+		var filesData []map[string]any
+		for _, f := range files {
+			filesData = append(filesData, f.(map[string]any))
+		}
+		totalLength, d, err := download.NewMultiFileDownload(filesData, tf.Info.Name)
+		if err != nil {
+			return err
+		}
+		tf.Download = d
+		tf.Info.Length = totalLength
 	}
-
-	tf.BitfieldLength = int32(len(tf.Info.Pieces) / 20)
-	tf.Bitfield = bitfield.NewBitfield(tf.BitfieldLength)
-	return nil
-}
-
-func (tf *TorrentFile) Initialize() error {
 	tf.NeddedPieces = make(chan *download.Piece, WORKING_PIECES)
 	tf.DownloadedPieces = make(chan *download.Piece, WORKING_PIECES)
 	tf.notifyDownload = make(chan bool, 2)
 	tf.notifyDownload <- false
-	
-	if _, err := os.Stat(tf.Info.Name); err == nil {
-		tf.Bitfield.SetAll()
-		tf.Download = download.NewDownloadFromExistingFile(tf.Info.Name)
-		err := VerifyFileIntegrity(tf.Download.GetFile(),tf,&tf.Bitfield)
-		if err != nil {
-			return err
-		}
-	} else {
-		tf.Download = download.NewDownload(uint32(tf.Info.Length), tf.Info.Name)
-	}
 	tf.DownloadComplete = make(chan bool)
+	tf.BitfieldLength = int32(len(tf.Info.Pieces) / 20)
+	tf.Bitfield = bitfield.NewBitfield(tf.BitfieldLength)
 	return nil
 }
 
@@ -221,19 +236,19 @@ func (tf *TorrentFile) BuildAnnounceURL(peerId [20]byte, port int) (string, erro
 }
 
 func (tf *TorrentFile) UpdateNeddedPieces() {
-	i := tf.BitfieldLength -1	
+	i := tf.BitfieldLength - 1
 	for {
 		increment := <-tf.notifyDownload
-		if i<0{
+		if i < 0 {
 			continue
 		}
 		if !increment {
 			count := 0
-			for count < WORKING_PIECES	 && i >= 0 {
+			for count < WORKING_PIECES && i >= 0 {
 				for tf.Bitfield.Test(i) {
 					i--
 				}
-				if i<0{
+				if i < 0 {
 					break
 				}
 				pieceLength := tf.Info.PieceLength
@@ -253,7 +268,7 @@ func (tf *TorrentFile) UpdateNeddedPieces() {
 			for tf.Bitfield.Test(i) {
 				i--
 			}
-			if i<0{
+			if i < 0 {
 				break
 			}
 			pieceLength := tf.Info.PieceLength
@@ -340,7 +355,7 @@ func (tf *TorrentFile) UpdateDownloadedPieces() {
 					fmt.Println("Error reading piece from disk", lastPiece, err)
 					continue
 				}
-				
+
 				hash := sha1.Sum(data)
 				tobeHash := tf.Info.Pieces[lastPiece*20 : (lastPiece+1)*20]
 				if !bytes.Equal(hash[:], tobeHash) {
@@ -369,13 +384,12 @@ func (tf *TorrentFile) Save() error {
 	return tf.Download.Save()
 }
 
-func VerifyFileIntegrity(f *os.File, t *TorrentFile, b *bitfield.Bitfield) error {
+func VerifyFileIntegrity(f download.TorrentFileStorage, t *TorrentFile, b *bitfield.Bitfield) error {
 	for i := int32(0); i < t.BitfieldLength; i++ {
 		if !b.Test(i) {
 			continue
 		}
 
-		// Compute the correct piece length. Last piece may be shorter.
 		pieceLen := t.Info.PieceLength
 		if i == t.BitfieldLength-1 {
 			rem := t.Info.Length % t.Info.PieceLength
@@ -384,28 +398,22 @@ func VerifyFileIntegrity(f *os.File, t *TorrentFile, b *bitfield.Bitfield) error
 			}
 		}
 
-		// Read exactly pieceLen bytes for this piece.
 		buff := make([]byte, pieceLen)
 		offset := int64(i) * t.Info.PieceLength
-		if _, err := f.Seek(offset, 0); err != nil {
-			return fmt.Errorf("failed to seek for piece %d: %w", i, err)
-		}
-		n, err := f.Read(buff)
-		if err != nil {
+
+		n, err := f.ReadAt(buff, offset)
+		if err != nil && err != io.EOF { // tolerate EOF on last piece
 			return fmt.Errorf("failed to read piece %d: %w", i, err)
 		}
 		if int64(n) != pieceLen {
 			return fmt.Errorf("short read for piece %d: expected %d, got %d", i, pieceLen, n)
 		}
 
-		// Expected hash from torrent metadata.
 		var expected [20]byte
 		copy(expected[:], t.Info.Pieces[i*20:(i+1)*20])
 
-		// Actual hash from file slice (only bytes read).
-		actual := sha1.Sum(buff[:n])
+		actual := sha1.Sum(buff)
 
-		// On mismatch, clear bit; caller can recompute score/valid count.
 		if !bytes.Equal(expected[:], actual[:]) {
 			b.Clear(i)
 			fmt.Printf("Piece %d failed integrity check : %x\n", i, expected)

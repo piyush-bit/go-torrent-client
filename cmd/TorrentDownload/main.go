@@ -12,20 +12,14 @@ import (
 )
 
 func main() {
-	tf, err := torrentfile.ParseTorrentFile("./tor.torrent")
+	tf, err := torrentfile.ParseTorrentFile("./tor2.torrent")
 	if err != nil {
-		fmt.Println(err)
+		fmt.Println("Error parsing torrent file :",err)
 		return
 	}
-	err = tf.Initialize()
+	peers, _ ,err := peer.RetrivePeers(tf)
 	if err != nil {
-		fmt.Println(err)
-		return
-	}
-
-	peers, err := peer.RetrivePeers(tf)
-	if err != nil {
-		fmt.Println(err)
+		fmt.Println("Error retriving peers :",err)
 		return
 	}
 
