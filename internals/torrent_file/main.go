@@ -244,8 +244,8 @@ func ParseTorrentFile(path string) (*TorrentFile, error) {
 	return tf, nil
 }
 
-func (tf *TorrentFile) BuildAnnounceURL(peerId [20]byte, port int) (string, error) {
-	u, err := url.Parse(tf.Announce)
+func (tf *TorrentFile) BuildAnnounceURL(tracker string, peerId [20]byte, port int) (string, error) {
+	u, err := url.Parse(tracker)
 	if err != nil {
 		return "", err
 	}

@@ -68,12 +68,12 @@ func RetrivePeers(tf *torrentfile.TorrentFile) ([]peer, int, error) {
 	if tf.Announce != "" {
 		announceUrl := tf.Announce
 		if strings.HasPrefix(announceUrl, "http") {
-			peers, count, err := HttpTrackerRequest(tf)
+			peers, count, err := HttpTrackerRequest(announceUrl, tf)
 			if err == nil {
 				return peers, count, nil
 			}
 		} else if strings.HasPrefix(announceUrl, "udp") {
-			peers, count, err := UdpTrackerRequest(tf)
+			peers, count, err := UdpTrackerRequest(announceUrl, tf)
 			if err == nil {
 				return peers, count, nil
 			}
@@ -101,10 +101,18 @@ func RetrivePeers(tf *torrentfile.TorrentFile) ([]peer, int, error) {
 				var count int
 				var err error
 
-				if strings.HasPrefix(url, "http") {
-					peers, count, err = HttpTrackerRequest(tf)
-				} else if strings.HasPrefix(url, "udp") {
-					peers, count, err = UdpTrackerRequest(tf)
+				tryTracker := func(){
+					if strings.HasPrefix(url, "http") {
+						peers, count, err = HttpTrackerRequest(url, tf)
+					} else if strings.HasPrefix(url, "udp") {
+						peers, count, err = UdpTrackerRequest(url, tf)
+					}
+				}
+
+				tryTracker()
+				// 1 retry 
+				if err != nil {
+					tryTracker()
 				}
 
 				if err == nil {

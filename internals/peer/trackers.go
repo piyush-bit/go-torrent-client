@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-const UDP_TRACKER_TIMEOUT = 2 * time.Second
+const UDP_TRACKER_TIMEOUT = 1 * time.Second
 
 // generate random uint32 transaction id
 func randUint32() uint32 {
@@ -23,8 +23,7 @@ func randUint32() uint32 {
 	return binary.BigEndian.Uint32(b[:])
 }
 
-func UdpTrackerRequest(tf *torrentfile.TorrentFile) ([]peer, int, error) {
-	tracker := tf.Announce
+func UdpTrackerRequest(tracker string, tf *torrentfile.TorrentFile) ([]peer, int, error) {
 	addr, err := net.ResolveUDPAddr("udp", strings.TrimPrefix(tracker, "udp://"))
 	if err != nil {
 		return nil, 0, fmt.Errorf("resolve: %w", err)
@@ -151,13 +150,13 @@ func UdpTrackerRequest(tf *torrentfile.TorrentFile) ([]peer, int, error) {
 	return peers, int(interval), nil
 }
 
-func HttpTrackerRequest(tf *torrentfile.TorrentFile) ([]peer, int, error) {
+func HttpTrackerRequest(url string, tf *torrentfile.TorrentFile) ([]peer, int, error) {
 	peerId := tf.PeerId
 	if peerId == [20]byte{} {
 		peerId = GeneratePeerId()
 		tf.PeerId = peerId
 	}
-	url, err := tf.BuildAnnounceURL(peerId, tf.Port)
+	url, err := tf.BuildAnnounceURL(url, peerId, tf.Port)
 	if err != nil {
 		return nil, 0, err
 	}
