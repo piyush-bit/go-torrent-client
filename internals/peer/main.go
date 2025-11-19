@@ -1,6 +1,7 @@
 package peer
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
@@ -56,13 +57,89 @@ func ParsePeers(data []byte) ([]peer, error) {
 }
 
 func RetrivePeers(tf *torrentfile.TorrentFile) ([]peer, int, error) {
-	announce := tf.Announce 
-	if strings.HasPrefix(announce,"http") {
-		return HttpTrackerRequest(tf)
-	} else if strings.HasPrefix(announce,"udp") {
-		return udpTrackerRequest(tf)
+
+	type trackerResult struct {
+		peers []peer
+		count int
+		err   error
 	}
-	return nil, 0, fmt.Errorf("invalid announce url")
+
+	// tier -0
+	if tf.Announce != "" {
+		announceUrl := tf.Announce
+		if strings.HasPrefix(announceUrl, "http") {
+			peers, count, err := HttpTrackerRequest(tf)
+			if err == nil {
+				return peers, count, nil
+			}
+		} else if strings.HasPrefix(announceUrl, "udp") {
+			peers, count, err := UdpTrackerRequest(tf)
+			if err == nil {
+				return peers, count, nil
+			}
+		}
+	}
+
+	fmt.Println("Tracker failed on tier: 0")
+
+	// tier -1
+	for i, tier := range tf.AnnounceList {
+		fmt.Println("Tracker tier: ", i)
+		resultCh := make(chan trackerResult, 1)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		var wg sync.WaitGroup
+
+		for _, announceUrl := range tier {
+			url := announceUrl
+
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+
+				var peers []peer
+				var count int
+				var err error
+
+				if strings.HasPrefix(url, "http") {
+					peers, count, err = HttpTrackerRequest(tf)
+				} else if strings.HasPrefix(url, "udp") {
+					peers, count, err = UdpTrackerRequest(tf)
+				}
+
+				if err == nil {
+					if len(peers) <= 0 {
+						return
+					}
+					select {
+					case resultCh <- trackerResult{peers, count, nil}:
+						fmt.Println("Tracker success on tier:", i)
+						cancel()
+					case <-ctx.Done():
+						return
+					}
+				}
+			}()
+		}
+
+		// Wait for all goroutines
+		go func() {
+			wg.Wait()
+			close(resultCh)
+		}()
+
+		// take the first result
+		res, ok := <-resultCh
+		cancel()
+
+		if ok && res.err == nil {
+			fmt.Println("Tracker success on tier:", res.count)
+			return res.peers, res.count, nil
+		}
+	}
+
+	return nil, 0, fmt.Errorf("no peers found")
+
 }
 
 func GeneratePeerId() [20]byte {
