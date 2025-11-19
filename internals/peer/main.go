@@ -5,15 +5,14 @@ import (
 	"encoding/binary"
 	"fmt"
 	handshake "go-torrent-client/internals/Handshake"
-	"go-torrent-client/internals/bencoding"
 	bitfield "go-torrent-client/internals/bitfield"
 	download "go-torrent-client/internals/download"
 	message "go-torrent-client/internals/message"
 	torrentfile "go-torrent-client/internals/torrent_file"
 	"io"
 	"net"
-	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -56,35 +55,14 @@ func ParsePeers(data []byte) ([]peer, error) {
 	return ans, nil
 }
 
-func RetrivePeers(tf *torrentfile.TorrentFile) ([]peer, error) {
-	peerId := tf.PeerId
-	if peerId == [20]byte{} {
-		peerId = GeneratePeerId()
-		tf.PeerId = peerId
+func RetrivePeers(tf *torrentfile.TorrentFile) ([]peer, int, error) {
+	announce := tf.Announce 
+	if strings.HasPrefix(announce,"http") {
+		return HttpTrackerRequest(tf)
+	} else if strings.HasPrefix(announce,"udp") {
+		return udpTrackerRequest(tf)
 	}
-	url, err := tf.BuildAnnounceURL(peerId, 3100)
-	if err != nil {
-		return nil, err
-	}
-
-	resp, err := http.Get(url)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-	data, _, err := bencoding.ParseBencode(body)
-	if err != nil {
-		return nil, err
-	}
-	peers, err := ParsePeers(data.(map[string]any)["peers"].([]byte))
-	if err != nil {
-		return nil, err
-	}
-	return peers, nil
+	return nil, 0, fmt.Errorf("invalid announce url")
 }
 
 func GeneratePeerId() [20]byte {
@@ -298,7 +276,7 @@ func (p *peerConnection) FindWork() error {
 		case <-p.chokedSignal:
 			// On choke: if we were working on a piece, put it back and reset.
 			p.workingPieceMu.Lock()
-			
+
 			if p.workingPiece != nil {
 				p.workingPiece.ClearRequested()
 				p.Tf.NeddedPieces <- p.workingPiece
@@ -338,13 +316,13 @@ func (p *peerConnection) FindWork() error {
 						break
 					}
 					bufferSize := torrentfile.DOWNLOAD_BUFFER_SIZE
-					if index == p.workingPiece.GetTotalBufferLen() -1 {
+					if index == p.workingPiece.GetTotalBufferLen()-1 {
 						bufferSize = len(p.workingPiece.Data) % torrentfile.DOWNLOAD_BUFFER_SIZE
 						if bufferSize == 0 {
 							bufferSize = torrentfile.DOWNLOAD_BUFFER_SIZE
 						}
 					}
-						
+
 					p.Outgoing <- message.Request(
 						p.workingPiece.Index,
 						int32(index*torrentfile.DOWNLOAD_BUFFER_SIZE),

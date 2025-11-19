@@ -1,25 +1,32 @@
 package main
 
-
 import (
 	"fmt"
 	peer "go-torrent-client/internals/peer"
 	torrentfile "go-torrent-client/internals/torrent_file"
 	"os"
 	"os/signal"
+	"runtime/pprof"
 	"syscall"
 	"time"
 )
 
 func main() {
+	f, _ := os.Create("cpu.prof")
+	pprof.StartCPUProfile(f)
+	defer pprof.StopCPUProfile()
 	tf, err := torrentfile.ParseTorrentFile("./tor2.torrent")
 	if err != nil {
-		fmt.Println("Error parsing torrent file :",err)
+		fmt.Println("Error parsing torrent file :", err)
 		return
 	}
-	peers, _ ,err := peer.RetrivePeers(tf)
+	if tf.Bitfield.IsAllSet(tf.BitfieldLength) {
+		fmt.Println("Already Completed")
+		return
+	}
+	peers, _, err := peer.RetrivePeers(tf)
 	if err != nil {
-		fmt.Println("Error retriving peers :",err)
+		fmt.Println("Error retriving peers :", err)
 		return
 	}
 

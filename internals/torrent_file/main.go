@@ -27,6 +27,7 @@ type TorrentFile struct {
 	Announce         string
 	InfoHash         [20]byte
 	PeerId           [20]byte
+	Port             int
 	Bitfield         bitfield.Bitfield
 	BitfieldLength   int32
 	NeddedPieces     chan *download.Piece
@@ -158,6 +159,8 @@ func (tf *TorrentFile) ParseTorrentField(data []byte) error {
 	} else {
 		return fmt.Errorf("invalid torrent file : pieces not byte array")
 	}
+	tf.BitfieldLength = int32(len(tf.Info.Pieces) / 20)
+	tf.Bitfield = bitfield.NewBitfield(tf.BitfieldLength)
 	if length, ok := info["length"].(int64); ok {
 		tf.Info.Length = length
 		if _, err := os.Stat(tf.Info.Name); err == nil {
@@ -174,11 +177,11 @@ func (tf *TorrentFile) ParseTorrentField(data []byte) error {
 		} else {
 			tf.Download = download.NewDownload(uint32(tf.Info.Length), tf.Info.Name)
 		}
+
 	} else {
 		files, ok := info["files"].([]any)
 		if !ok {
 			fmt.Println("Type of files is ", reflect.TypeOf(files))
-
 			return fmt.Errorf("invalid torrent file : files not array")
 		}
 		var filesData []map[string]any
@@ -189,16 +192,24 @@ func (tf *TorrentFile) ParseTorrentField(data []byte) error {
 		if err != nil {
 			return err
 		}
+		if d == nil {
+			return fmt.Errorf("invalid torrent file : download not created")
+		}
 		tf.Download = d
 		tf.Info.Length = totalLength
+		tf.Bitfield.SetAll()
+		err = VerifyFileIntegrity(d.GetFile(), tf, &tf.Bitfield)
+		if err != nil {
+			return err
+		}
 	}
+	// TODO : refactor to get the unique port (the port available)
+	tf.Port = 6881
 	tf.NeddedPieces = make(chan *download.Piece, WORKING_PIECES)
 	tf.DownloadedPieces = make(chan *download.Piece, WORKING_PIECES)
 	tf.notifyDownload = make(chan bool, 2)
 	tf.notifyDownload <- false
 	tf.DownloadComplete = make(chan bool)
-	tf.BitfieldLength = int32(len(tf.Info.Pieces) / 20)
-	tf.Bitfield = bitfield.NewBitfield(tf.BitfieldLength)
 	return nil
 }
 
@@ -385,8 +396,10 @@ func (tf *TorrentFile) Save() error {
 }
 
 func VerifyFileIntegrity(f download.TorrentFileStorage, t *TorrentFile, b *bitfield.Bitfield) error {
+	fmt.Println("Verifying file integrity")
 	for i := int32(0); i < t.BitfieldLength; i++ {
 		if !b.Test(i) {
+			fmt.Printf("Piece %d not downloaded\n", i)
 			continue
 		}
 
