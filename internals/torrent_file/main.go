@@ -25,6 +25,7 @@ const (
 type TorrentFile struct {
 	Info             TorrentInfo
 	Announce         string
+	AnnounceList     [][]string
 	InfoHash         [20]byte
 	PeerId           [20]byte
 	Port             int
@@ -37,9 +38,6 @@ type TorrentFile struct {
 	DownloadComplete chan bool
 }
 
-// using single file for now , will add multiple files later
-//
-//	TODO : add multiple files
 type TorrentInfo struct {
 	Name        string
 	PieceLength int64
@@ -125,6 +123,25 @@ func (tf *TorrentFile) ParseTorrentField(data []byte) error {
 		return fmt.Errorf("invalid torrent file : announce not byte array")
 	}
 	tf.Announce = string(announce)
+	if announceList, ok := m["announce-list"].([]any); ok {
+		tf.AnnounceList = make([][]string, len(announceList))
+		for i, tracker := range announceList {
+			tr , ok := tracker.([]any)
+			if !ok {
+				fmt.Println("announce-list not array")
+				continue
+			}
+			tf.AnnounceList[i] = make([]string, len(tr))
+			for j, tracker := range tr {
+				tracker , ok := tracker.([]byte)
+				if !ok {
+					fmt.Println("tracker not byte array")
+					continue
+				}
+				tf.AnnounceList[i][j] = string(tracker)
+			}
+		}
+	}
 	info, ok := m["info"].(map[string]any)
 	if !ok {
 		return fmt.Errorf("invalid torrent file : info not dictionary")
@@ -429,7 +446,7 @@ func VerifyFileIntegrity(f download.TorrentFileStorage, t *TorrentFile, b *bitfi
 
 		if !bytes.Equal(expected[:], actual[:]) {
 			b.Clear(i)
-			fmt.Printf("Piece %d failed integrity check : %x\n", i, expected)
+			// fmt.Printf("Piece %d failed integrity check : %x\n", i, expected)
 		}
 	}
 	return nil

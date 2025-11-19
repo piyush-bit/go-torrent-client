@@ -14,6 +14,8 @@ import (
 	"time"
 )
 
+const UDP_TRACKER_TIMEOUT = 2 * time.Second
+
 // generate random uint32 transaction id
 func randUint32() uint32 {
 	var b [4]byte
@@ -21,7 +23,7 @@ func randUint32() uint32 {
 	return binary.BigEndian.Uint32(b[:])
 }
 
-func udpTrackerRequest(tf *torrentfile.TorrentFile) ([]peer, int, error) {
+func UdpTrackerRequest(tf *torrentfile.TorrentFile) ([]peer, int, error) {
 	tracker := tf.Announce
 	addr, err := net.ResolveUDPAddr("udp", strings.TrimPrefix(tracker, "udp://"))
 	if err != nil {
@@ -49,7 +51,7 @@ func udpTrackerRequest(tf *torrentfile.TorrentFile) ([]peer, int, error) {
 	}
 
 	// wait for response (UDP timeout)
-	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	conn.SetReadDeadline(time.Now().Add(UDP_TRACKER_TIMEOUT))
 
 	resp := make([]byte, 2048)
 	n, err := conn.Read(resp)
@@ -77,7 +79,10 @@ func udpTrackerRequest(tf *torrentfile.TorrentFile) ([]peer, int, error) {
 
 	action = 1
 	transactionID = randUint32()
-	peerID := GeneratePeerId()
+	if tf.PeerId == [20]byte{} {
+		tf.PeerId = GeneratePeerId()
+	}
+	peerID := tf.PeerId
 	downloaded := uint64(0)
 	uploaded := uint64(0)
 	left := uint64(0) // if non-zero, tracker thinks you want all peers
@@ -107,7 +112,7 @@ func udpTrackerRequest(tf *torrentfile.TorrentFile) ([]peer, int, error) {
 		return nil, 0, fmt.Errorf("send announce: %w", err)
 	}
 
-	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	conn.SetReadDeadline(time.Now().Add(UDP_TRACKER_TIMEOUT))
 	n, err = conn.Read(resp)
 	if err != nil {
 		return nil, 0, fmt.Errorf("announce resp: %w", err)
