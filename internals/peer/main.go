@@ -329,6 +329,7 @@ func (p *peerConnection) ReadLoop() error {
 			// if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 			// 	return nil
 			// }
+			p.chokedSignal <- true
 			return err
 		}
 		// fmt.Println("Received message : ", msg.ID)
@@ -349,14 +350,28 @@ func (p *peerConnection) WriteLoop() error {
 		if err != nil {
 			return err
 		}
-
-		// fmt.Println("Sent message : ", msg.ID)
 	}
 	return nil
 }
 
 func (p *peerConnection) FindWork() error {
 	for {
+		if p.workingPiece == nil {
+			p.workingPieceMu.Lock()
+			if p.workingPiece == nil {
+				piece := <-p.Tf.NeddedPieces
+				if !p.Bitfield.Test(piece.Index) {
+					p.Tf.NeddedPieces <- piece
+					p.workingPieceMu.Unlock()
+					time.Sleep(time.Second)
+					continue
+				}
+				p.workingPiece = piece
+				fmt.Printf("Piece %d picked by peer %s\n", piece.Index, p.Peer.String())
+			}
+			p.workingPieceMu.Unlock()
+		}
+
 		select {
 		case <-p.chokedSignal:
 			// On choke: if we were working on a piece, put it back and reset.
@@ -367,39 +382,37 @@ func (p *peerConnection) FindWork() error {
 				p.Tf.NeddedPieces <- p.workingPiece
 				p.workingPiece = nil
 			}
-			for _, retry := range p.ScheduledRetry {
-				retry.Stop()
-			}
-			p.ScheduledRetry = []*time.Timer{}
 			p.workingPieceMu.Unlock()
+			return nil
 
-		default:
-			// Ensure we have a workingPiece; block until there is valid work.
+		case <-p.workingPiece.HasChanged:
+			// fmt.Println("Piece changed")
 			p.workingPieceMu.Lock()
 			if p.workingPiece == nil {
-				piece := <-p.Tf.NeddedPieces
-				fmt.Printf("Piece %d picked by peer %s\n", piece.Index, p.Peer.String())
-				if !p.Bitfield.Test(piece.Index) {
-					p.Tf.NeddedPieces <- piece
-					p.workingPieceMu.Unlock()
-					// fmt.Printf("Bitfield of :%s\n%v\n", p.Peer.String(), p.Bitfield)
-					// return nil
-					time.Sleep(time.Second)
-					continue
-				}
+				// fmt.Println("Piece is nil")
+				p.workingPieceMu.Unlock()
+				continue
+			}
 
-				p.workingPiece = piece
-				// fmt.Printf("Piece %d picked by peer %s\n", piece.Index, p.Peer.String())
+			if p.workingPiece.IsComplete() {
+				p.Tf.DownloadedPieces <- p.workingPiece
+				p.workingPiece = nil
+				p.workingPieceMu.Unlock()
+				continue
 			}
 
 			empty, requested, _ := p.workingPiece.Status()
 			if requested < torrentfile.MAX_REQUESTS {
+				// fmt.Println("Requested < MAX_REQUESTS")
 				maxNew := min(empty, torrentfile.MAX_REQUESTS-requested)
+				// fmt.Println("Max new : ", maxNew)
 				for range maxNew {
 					index := p.workingPiece.GetEmptyIndex()
+					// fmt.Println("Index : ", index)
 					if index == -1 {
 						break
 					}
+					// fmt.Println("Requesting for piece ", p.workingPiece.Index, " index ", index)
 					bufferSize := torrentfile.DOWNLOAD_BUFFER_SIZE
 					if index == p.workingPiece.GetTotalBufferLen()-1 {
 						bufferSize = len(p.workingPiece.Data) % torrentfile.DOWNLOAD_BUFFER_SIZE
@@ -407,14 +420,13 @@ func (p *peerConnection) FindWork() error {
 							bufferSize = torrentfile.DOWNLOAD_BUFFER_SIZE
 						}
 					}
-
 					p.Outgoing <- message.Request(
 						p.workingPiece.Index,
 						int32(index*torrentfile.DOWNLOAD_BUFFER_SIZE),
 						int32(bufferSize),
 					)
 					p.workingPiece.SetRequested(index)
-
+					// fmt.Println("Request sent for piece ", p.workingPiece.Index, " index ", index)
 					idx := index
 					currPiece := p.workingPiece
 					retry := time.AfterFunc(torrentfile.REQUEST_TIMEOUT, func() {
@@ -427,13 +439,6 @@ func (p *peerConnection) FindWork() error {
 					})
 					p.ScheduledRetry = append(p.ScheduledRetry, retry)
 				}
-			}
-
-			// Guard IsComplete with nil check to prevent panic.
-			if p.workingPiece != nil && p.workingPiece.IsComplete() {
-				p.Tf.DownloadedPieces <- p.workingPiece
-				fmt.Printf("Piece %d downloaded by peer %s, len(%d)\n", p.workingPiece.Index, p.Peer.String(), len(p.Tf.DownloadedPieces))
-				p.workingPiece = nil
 			}
 			p.workingPieceMu.Unlock()
 		}
